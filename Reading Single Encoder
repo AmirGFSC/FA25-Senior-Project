@@ -1,0 +1,24 @@
+from periphery import SPI
+import time
+
+spi = SPI("/dev/spidev0.0",1,1_000_000)
+
+def read_frame():
+    rx = spi.transfer([0x00, 0x00])
+    return (rx[0] << 8) | rx[1]
+def angle_status():
+    w = read_frame()
+    pos10 = (w >>6) & 0x03FF
+    status = (w >> 1) & 0x1F
+    pbit = w        & 0x01
+    x = (w >> 1) & 0x7FFF
+    parity_ok = (bin(x).count("1") % 2) == 0 and pbit == 0
+    angle_deg = pos10 * (360.0 / 1024.0)
+    return angle_deg, status, parity_ok
+try:
+    while True:
+        ang, st, ok = angle_status()
+        print(f"angle={ang:7.2f}, status=0b{st:05b}, parity_ok={ok}")
+        time.sleep(0.1)
+finally:
+    spi.close()
