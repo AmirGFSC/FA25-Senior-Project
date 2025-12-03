@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""
+Read 5 Bourns EMS22A absolute encoders in daisy-chain mode
+on a Raspberry Pi 4 (SPI0).
+
+WIRING (DAISY-CHAIN):
+
+  Shared to ALL encoders:
+    - Pi 3.3 V  --> encoder pin 5 (VCC)
+    - Pi GND    --> encoder pin 3 (GND)
+    - BCM 11    --> encoder pin 2 (CLK)
+    - BCM 5     --> encoder pin 6 (CS)  (one CS for the whole chain)
+
+  Data chain:
+    - Pi MOSI (BCM 10) --> Encoder #1 pin 1 (DI)
+    - Encoder #1 pin 4 (DO) --> Encoder #2 pin 1 (DI)
+    - Encoder #2 pin 4 (DO) --> Encoder #3 pin 1 (DI)
+    - Encoder #3 pin 4 (DO) --> Encoder #4 pin 1 (DI)
+    - Encoder #4 pin 4 (DO) --> Encoder #5 pin 1 (DI)
+    - Encoder #5 pin 4 (DO) --> Pi MISO (BCM 9)
+
+NUM_ENCODERS = 5
+Each encoder outputs 16 bits, so we read 10 bytes (80 bits) per SPI transfer.
+"""
+
+import time
+import spidev
+import RPi.GPIO as GPIO
+
+# Number of encoders in the daisy chain
+NUM_ENCODERS = 5
+
+# One common chip-select line for the whole chain (BCM numbering)
+CS_PIN = 5
+
+# SPI bus/device (SPI0)
+SPI_BUS = 0
+SPI_DEVICE = 0
+
+
+def setup_spi():
+    """Initialize SPI interface and return the spidev object."""
+    spi = spidev.SpiDev()
+    spi.open(SPI_BUS, SPI_DEVICE)
+
+    # EMS22A uses CPOL=0, CPHA=1 -> SPI mode 1
+    spi.mode = 0b01
+
+    # Conservative clock speed (500 kHz)
+    spi.max_speed_hz = 500_000
+
+    # We'll manually control CS with GPIO instead of hardware CE0/CE1
+    spi.no_cs = True
+
+    return spi
+
+
+def setup_gpio():
+    """Initialize GPIO for chip-select."""
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(CS_PIN, GPIO.OUT, initial=GPIO.HIGH)
+
+
+def read_raw_chain(spi):
+    """
+    Read raw bytes from the daisy-chained encoders.
+
+    Each encoder outputs a 16-bit frame.
+    With NUM_ENCODERS = 5, we read 5 * 2 = 10 bytes.
+    """
+    # Select the chain (active low)
+    GPIO.output(CS_PIN, GPIO.LOW)
+
+    # Short delay to meet t_CSn(min)
+    time.sleep(0.000001)  # 1 µs
+
+    # Send dummy bytes to generate clock pulses;
+    # data returned on MISO is the encoders' output.
+    raw = spi.xfer2([0x00] * (NUM_ENCODERS * 2))
+
+    # Release CS
+    GPIO.output(CS_PIN, GPIO.HIGH)
+
+    return raw
+
+
+def frames_to_angles(raw):
+    """
+    Convert raw bytes into angles for each encoder.
+
+    Each 16-bit frame:
+      [D9..D0, S1..S5, P]
+
+    We keep bits 15..6 (10 bits D9..D0) as position 0..1023
+    then convert to degrees (0..360).
+    """
+    angles = []
+
+    for i in range(NUM_ENCODERS):
+        msb = raw[2 * i]
+        lsb = raw[2 * i + 1]
+        frame = (msb << 8) | lsb
+
+        # Extract top 10 bits (position counts)
+        counts = (frame >> 6) & 0x03FF  # 0..1023
+
+        # Convert to degrees, no offset
+        angle = (counts * 360.0) / 1024.0
+        angles.append(angle)
+
+    return angles
+
+
+def main():
+    spi = None
+    try:
+        setup_gpio()
+        spi = setup_spi()
+
+        print("Reading 5 EMS22A encoders in daisy-chain mode.")
+        print("Press Ctrl+C to stop.\n")
+
+        while True:
+            raw = read_raw_chain(spi)
+            angles = frames_to_angles(raw)
+
+            # Print all 5 angles nicely
+            line = " | ".join(f"E{i+1}: {ang:7.2f}°" for i, ang in enumerate(angles))
+            print(line)
+
+            time.sleep(0.1)  # 10 Hz update rate
+
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+    finally:
+        if spi is not None:
+            spi.close()
+        GPIO.cleanup()
+
+
+if __name__ == "__main__":
+    main()
